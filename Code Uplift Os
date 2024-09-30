@@ -1,0 +1,400 @@
+import random
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter import scrolledtext
+import pygame
+from typing import List, Dict, Set
+
+# Initialize Pygame mixer
+pygame.mixer.init()
+
+# Sample uplifting messages
+uplifting_messages = [
+    "You're doing great!",
+    "Keep up the good work!",
+    "Believe in yourself!",
+    "Stay positive!",
+    "You are capable of amazing things!"
+]
+
+class User:
+    def __init__(self, user_id: str, name: str, email: str, password: str):
+        self.user_id = user_id
+        self.name = name
+        self.email = email
+        self.password = password
+        self.interests: Set[str] = set()
+        self.skills: Set[str] = set()
+        self.goals: List[str] = []
+        self.connections: Set[str] = set()
+        self.privacy_setting: str = "public"
+        self.interaction_history: Dict[str, int] = {}
+
+class AIAgent:
+    def __init__(self):
+        self.users: Dict[str, User] = {}
+
+    def create_user(self, user_id: str, name: str, email: str, password: str) -> User:
+        user = User(user_id, name, email, password)
+        self.users[user_id] = user
+        return user
+
+    def update_profile(self, user_id: str, interests: Set[str] = None, skills: Set[str] = None, goals: List[str] = None):
+        user = self.users[user_id]
+        if interests:
+            user.interests.update(interests)
+        if skills:
+            user.skills.update(skills)
+        if goals:
+            user.goals.extend(goals)
+
+    def set_privacy(self, user_id: str, setting: str):
+        self.users[user_id].privacy_setting = setting
+
+    def recommend_connections(self, user_id: str, num_recommendations: int = 5) -> List[str]:
+        user = self.users[user_id]
+        potential_connections = []
+
+        for other_id, other_user in self.users.items():
+            if other_id != user_id and other_user.privacy_setting == "public":
+                score = self._calculate_compatibility(user, other_user)
+                potential_connections.append((other_id, score))
+
+        potential_connections.sort(key=lambda x: x[1], reverse=True)
+        return [id for id, _ in potential_connections[:num_recommendations]]
+
+    def _calculate_compatibility(self, user1: User, user2: User) -> float:
+        interest_similarity = len(user1.interests.intersection(user2.interests))
+        skill_complementarity = len(user1.skills.symmetric_difference(user2.skills))
+        past_interaction = user1.interaction_history.get(user2.user_id, 0)
+
+        return interest_similarity + skill_complementarity + past_interaction
+
+    def accept_connection(self, user_id: str, other_id: str):
+        self.users[user_id].connections.add(other_id)
+        self.users[other_id].connections.add(user_id)
+        self.users[user_id].interaction_history[other_id] = self.users[user_id].interaction_history.get(other_id, 0) + 1
+        self.users[other_id].interaction_history[user_id] = self.users[other_id].interaction_history.get(user_id, 0) + 1
+
+    def search_users_by_skill(self, skill: str) -> List[str]:
+        return [user_id for user_id, user in self.users.items() if skill in user.skills and user.privacy_setting == "public"]
+
+    def form_group(self, interest: str, min_size: int = 3, max_size: int = 10) -> List[str]:
+        interested_users = [user_id for user_id, user in self.users.items() if interest in user.interests and user.privacy_setting == "public"]
+        if len(interested_users) < min_size:
+            return []
+        return random.sample(interested_users, min(len(interested_users), max_size))
+
+# Function to handle errors
+def handle_error(error_message):
+    print(f"Error: {error_message}")
+
+# Function to reply to an uplifting message
+def reply_to_message(original_message, reply):
+    try:
+        print(f"Original Message: {original_message}")
+        print(f"Reply: {reply}")
+        return reply
+    except Exception as e:
+        handle_error(f"Error replying to the message: {e}")
+        return None
+
+# Function to get a random uplifting message
+def get_random_message():
+    return random.choice(uplifting_messages)
+
+class CommuniSphereApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("CommuniSphere")
+        self.geometry("800x600")
+        
+        self.ai_agent = AIAgent()
+        self.current_user_id = None
+        
+        container = tk.Frame(self)
+        container.pack(side="top", fill="both", expand=True)
+        
+        self.frames = {}
+        
+        for F in (StartPage, MessagesPage, PhotosPage, SongsPage, LoginPage, ProfilePage, ConnectionsPage):
+            page_name = F.__name__
+            frame = F(parent=container, controller=self)
+            self.frames[page_name] = frame
+            frame.grid(row=0, column=0, sticky="nsew")
+        
+        self.show_frame("StartPage")
+
+    def show_frame(self, page_name):
+        frame = self.frames[page_name]
+        frame.tkraise()
+
+class StartPage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Welcome to CommuniSphere")
+        label.pack(side="top", fill="x", pady=10)
+        
+        login_button = tk.Button(self, text="Login", command=lambda: controller.show_frame("LoginPage"))
+        login_button.pack()
+        
+        profile_button = tk.Button(self, text="Create Profile", command=lambda: controller.show_frame("ProfilePage"))
+        profile_button.pack()
+
+        msg_button = tk.Button(self, text="Messages", command=lambda: controller.show_frame("MessagesPage"))
+        msg_button.pack()
+        
+        photos_button = tk.Button(self, text="Photos", command=lambda: controller.show_frame("PhotosPage"))
+        photos_button.pack()
+        
+        songs_button = tk.Button(self, text="Songs", command=lambda: controller.show_frame("SongsPage"))
+        songs_button.pack()
+
+        connections_button = tk.Button(self, text="Connections", command=lambda: controller.show_frame("ConnectionsPage"))
+        connections_button.pack()
+
+class LoginPage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Log In")
+        label.pack(side="top", fill="x", pady=10)
+
+        self.email_entry = tk.Entry(self)
+        self.email_entry.pack()
+        self.email_entry.insert(0, "Email")
+
+        self.password_entry = tk.Entry(self, show="*")
+        self.password_entry.pack()
+        self.password_entry.insert(0, "Password")
+
+        login_button = tk.Button(self, text="Log In", command=self.log_in)
+        login_button.pack()
+
+        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
+        back_button.pack()
+
+    def log_in(self):
+        email = self.email_entry.get()
+        password = self.password_entry.get()
+        for user_id, user in self.controller.ai_agent.users.items():
+            if user.email == email and user.password == password:
+                self.controller.current_user_id = user_id
+                messagebox.showinfo("Success", f"Logged in successfully as {user.name}")
+                self.controller.show_frame("StartPage")
+                return
+        messagebox.showerror("Error", "Invalid email or password")
+
+class ProfilePage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Create Profile")
+        label.pack(side="top", fill="x", pady=10)
+
+        self.username_entry = tk.Entry(self)
+        self.username_entry.pack()
+        self.username_entry.insert(0, "Username")
+
+        self.email_entry = tk.Entry(self)
+        self.email_entry.pack()
+        self.email_entry.insert(0, "Email")
+
+        self.password_entry = tk.Entry(self, show="*")
+        self.password_entry.pack()
+        self.password_entry.insert(0, "Password")
+
+        self.interests_entry = tk.Entry(self)
+        self.interests_entry.pack()
+        self.interests_entry.insert(0, "Interests (comma-separated)")
+
+        self.skills_entry = tk.Entry(self)
+        self.skills_entry.pack()
+        self.skills_entry.insert(0, "Skills (comma-separated)")
+
+        create_button = tk.Button(self, text="Create Profile", command=self.create_profile)
+        create_button.pack()
+
+        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
+        back_button.pack()
+
+    def create_profile(self):
+        username = self.username_entry.get()
+        email = self.email_entry.get()
+        password = self.password_entry.get()
+        interests = set(self.interests_entry.get().split(','))
+        skills = set(self.skills_entry.get().split(','))
+        
+        user_id = f"user_{len(self.controller.ai_agent.users) + 1}"
+        user = self.controller.ai_agent.create_user(user_id, username, email, password)
+        self.controller.ai_agent.update_profile(user_id, interests=interests, skills=skills)
+        
+        messagebox.showinfo("Success", "Profile created successfully")
+        self.controller.show_frame("StartPage")
+
+class MessagesPage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Messages")
+        label.pack(side="top", fill="x", pady=10)
+        
+        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
+        back_button.pack()
+
+        self.message_display = scrolledtext.ScrolledText(self, width=50, height=10)
+        self.message_display.pack()
+
+        random_msg_button = tk.Button(self, text="Post Random Message", command=self.post_random_message)
+        random_msg_button.pack()
+
+        self.custom_message_entry = tk.Entry(self)
+        self.custom_message_entry.pack()
+        self.custom_message_entry.insert(0, "Enter custom message")
+
+        custom_msg_button = tk.Button(self, text="Post Custom Message", command=self.post_custom_message)
+        custom_msg_button.pack()
+
+    def post_random_message(self):
+        message = get_random_message()
+        self.message_display.insert(tk.END, f"{message}\n")
+
+    def post_custom_message(self):
+        message = self.custom_message_entry.get()
+        self.message_display.insert(tk.END, f"{message}\n")
+
+class PhotosPage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Photos")
+        label.pack(side="top", fill="x", pady=10)
+        
+        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
+        back_button.pack()
+
+        upload_button = tk.Button(self, text="Upload Photo", command=self.upload_photo)
+        upload_button.pack()
+
+        self.photo_display = tk.Label(self)
+        self.photo_display.pack()
+
+    def upload_photo(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif")])
+        if file_path:
+            img = tk.PhotoImage(file=file_path)
+            self.photo_display.config(image=img)
+            self.photo_display.image = img
+
+class SongsPage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Songs")
+        label.pack(side="top", fill="x", pady=10)
+        
+        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
+        back_button.pack()
+
+        upload_button = tk.Button(self, text="Upload Song", command=self.upload_song)
+        upload_button.pack()
+
+        self.song_listbox = tk.Listbox(self)
+        self.song_listbox.pack()
+
+        play_button = tk.Button(self, text="Play Song", command=self.play_song)
+        play_button.pack()
+
+    def upload_song(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.mp3;*.wav;*.ogg")])
+        if file_path:
+            self.song_listbox.insert(tk.END, file_path)
+
+    def play_song(self):
+        selected_song = self.song_listbox.get(tk.ACTIVE)
+        if selected_song:
+            try:
+                pygame.mixer.music.load(selected_song)
+                pygame.mixer.music.play()
+                messagebox.showinfo("Playing", f"Playing {selected_song}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not play song: {e}")
+
+class ConnectionsPage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Connections")
+        label.pack(side="top", fill="x", pady=10)
+        
+        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
+        back_button.pack()
+
+        self.recommendations_listbox = tk.Listbox(self)
+        self.recommendations_listbox.pack()
+
+        refresh_button = tk.Button(self, text="Refresh Recommendations", command=self.refresh_recommendations)
+        refresh_button.pack()
+
+        connect_button = tk.Button(self, text="Connect", command=self.connect_with_user)
+        connect_button.pack()
+
+    def refresh_recommendations(self):
+        if self.controller.current_user_id:
+            recommendations = self.controller.ai_agent.recommend_connections(self.controller.current_user_id)
+            self.recommendations_listbox.delete(0, tk)
+                                                
+class ConnectionsPage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        label = tk.Label(self, text="Connections")
+        label.pack(side="top", fill="x", pady=10)
+        
+        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
+        back_button.pack()
+
+        self.recommendations_listbox = tk.Listbox(self)
+        self.recommendations_listbox.pack()
+
+        refresh_button = tk.Button(self, text="Refresh Recommendations", command=self.refresh_recommendations)
+        refresh_button.pack()
+
+        connect_button = tk.Button(self, text="Connect", command=self.connect_with_user)
+        connect_button.pack()
+
+    def refresh_recommendations(self):
+        if self.controller.current_user_id:
+            recommendations = self.controller.ai_agent.recommend_connections(self.controller.current_user_id)
+            self.recommendations_listbox.delete(0, tk.END)
+            for user_id in recommendations:
+                user = self.controller.ai_agent.users[user_id]
+                self.recommendations_listbox.insert(tk.END, f"{user.name} ({user_id})")
+        else:
+            messagebox.showinfo("Info", "Please log in to see recommendations")
+
+    def connect_with_user(self):
+        selected_user = self.recommendations_listbox.get(tk.ACTIVE)
+        if selected_user and self.controller.current_user_id:
+            self.controller.ai_agent.accept_connection(self.controller.current_user_id, selected_user)
+            messagebox.showinfo("Success", f"Connected with {selected_user}")
+        else:
+            messagebox.showerror("Error", "No user selected or you're not logged in.")
+
+        selected_index = self.recommendations_listbox.curselection()
+        if not selected_index:
+            messagebox.showinfo("Info", "Please select a user to connect with")
+            return
+
+        selected_item = self.recommendations_listbox.get(selected_index)
+        other_user_id = selected_item.split('(')[-1].split(')')[0]
+        
+        self.controller.ai_agent.accept_connection(self.controller.current_user_id, other_user_id)
+        messagebox.showinfo("Success", f"Connected with {self.controller.ai_agent.users[other_user_id].name}")
+        self.refresh_recommendations()
+
+if __name__ == "__main__":
+    app = CommuniSphereApp()
+    app.mainloop()
