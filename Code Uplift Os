@@ -1,10 +1,13 @@
-import random
+..import random
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox
-from tkinter import scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext
 import pygame
 from typing import List, Dict, Set
+import json
+import uuid
+import re
+from PIL import Image, ImageTk
 
 # Initialize Pygame mixer
 pygame.mixer.init()
@@ -28,69 +31,137 @@ class User:
         self.skills: Set[str] = set()
         self.goals: List[str] = []
         self.connections: Set[str] = set()
-        self.privacy_setting: str = "public"
+        self.privacy_setting: str = "public"  # Options: "public", "private"
         self.interaction_history: Dict[str, int] = {}
+        # New: Store user content
+        self.messages: List[str] = []
+        self.photos: List[str] = []  # Store file paths
+        self.songs: List[str] = []   # Store file paths
 
-class AIAgent:
-    def __init__(self):
-        self.users: Dict[str, User] = {}
+    def to_dict(self):
+        return {
+            "user_id": self.user_id,
+            "name": self.name,
+            "email": self.email,
+            "password": self.password,
+            "interests": list(self.interests),
+            "skills": list(self.skills),
+            "goals": self.goals,
+            "connections": list(self.connections),
+            "privacy_setting": self.privacy_setting,
+            "interaction_history": self.interaction_history,
+            "messages": self.messages,
+            "photos": self.photos,
+            "songs": self.songs
+        }
 
-    def create_user(self, user_id: str, name: str, email: str, password: str) -> User:
-        user = User(user_id, name, email, password)
-        self.users[user_id] = user
+    @classmethod
+    def from_dict(cls, data):
+        user = cls(data["user_id"], data["name"], data["email"], data["password"])
+        user.interests = set(data["interests"])
+        user.skills = set(data["skills"])
+        user.goals = data["goals"]
+        user.connections = set(data["connections"])
+        user.privacy_setting = data["privacy_setting"]
+        user.interaction_history = data["interaction_history"]
+        user.messages = data.get("messages", [])
+        user.photos = data.get("photos", [])
+        user.songs = data.get("songs", [])
         return user
 
-    def update_profile(self, user_id: str, interests: Set[str] = None, skills: Set[str] = None, goals: List[str] = None):
+class AIAgent:
+    def __init__(self, data_file: str = "users.json"):
+        self.users: Dict[str, User] = {}
+        self.data_file = data_file
+        self.load_users()
+
+    def create_user(self, user_id: str, name: str, email: str, password: str) -> User:
+        if any(user.email == email for user in self.users.values()):
+            raise ValueError("Email already exists")
+        user = User(user_id, name, email, password)
+        self.users[user_id] = user
+        self.save_users()
+        return user
+
+    def update_profile(self, user_id: str, interests: Set[str] = None, skills: Set[str] = None, 
+                     goals: List[str] = None, privacy_setting: str = None):
         user = self.users[user_id]
         if interests:
-            user.interests.update(interests)
+            user.interests.update([i.strip() for i in interests if i.strip()])
         if skills:
-            user.skills.update(skills)
+            user.skills.update([s.strip() for s in skills if s.strip()])
         if goals:
-            user.goals.extend(goals)
+            user.goals.extend([g.strip() for g in goals if g.strip()])
+        if privacy_setting in ["public", "private"]:
+            user.privacy_setting = privacy_setting
+        self.save_users()
 
     def set_privacy(self, user_id: str, setting: str):
-        self.users[user_id].privacy_setting = setting
+        if setting in ["public", "private"]:
+            self.users[user_id].privacy_setting = setting
+            self.save_users()
 
     def recommend_connections(self, user_id: str, num_recommendations: int = 5) -> List[str]:
-        user = self.users[user_id]
+        user = self.users.get(user_id)
+        if not user:
+            return []
         potential_connections = []
-
         for other_id, other_user in self.users.items():
-            if other_id != user_id and other_user.privacy_setting == "public":
+            if other_id != user_id and other_user.privacy_setting == "public" and other_id not in user.connections:
                 score = self._calculate_compatibility(user, other_user)
                 potential_connections.append((other_id, score))
-
         potential_connections.sort(key=lambda x: x[1], reverse=True)
         return [id for id, _ in potential_connections[:num_recommendations]]
 
     def _calculate_compatibility(self, user1: User, user2: User) -> float:
-        interest_similarity = len(user1.interests.intersection(user2.interests))
-        skill_complementarity = len(user1.skills.symmetric_difference(user2.skills))
+        interest_similarity = len(user1.interests.intersection(user2.interests)) / max(len(user1.interests | user2.interests), 1)
+        skill_complementarity = len(user1.skills.symmetric_difference(user2.skills)) / max(len(user1.skills | user2.skills), 1)
+        goal_similarity = sum(1 for g1 in user1.goals for g2 in user2.goals if g1.lower() == g2.lower()) / max(len(user1.goals + user2.goals), 1)
         past_interaction = user1.interaction_history.get(user2.user_id, 0)
-
-        return interest_similarity + skill_complementarity + past_interaction
+        return (0.4 * interest_similarity + 0.3 * skill_complementarity + 0.2 * goal_similarity + 0.1 * past_interaction) * 100
 
     def accept_connection(self, user_id: str, other_id: str):
+        if user_id not in self.users or other_id not in self.users:
+            raise ValueError("User not found")
         self.users[user_id].connections.add(other_id)
         self.users[other_id].connections.add(user_id)
         self.users[user_id].interaction_history[other_id] = self.users[user_id].interaction_history.get(other_id, 0) + 1
         self.users[other_id].interaction_history[user_id] = self.users[other_id].interaction_history.get(user_id, 0) + 1
+        self.save_users()
+
+    def remove_connection(self, user_id: str, other_id: str):
+        if user_id not in self.users or other_id not in self.users:
+            raise ValueError("User not found")
+        self.users[user_id].connections.discard(other_id)
+        self.users[other_id].connections.discard(user_id)
+        self.save_users()
 
     def search_users_by_skill(self, skill: str) -> List[str]:
-        return [user_id for user_id, user in self.users.items() if skill in user.skills and user.privacy_setting == "public"]
+        return [user_id for user_id, user in self.users.items() if skill.lower() in [s.lower() for s in user.skills] and user.privacy_setting == "public"]
+
+    def search_users_by_interest(self, interest: str) -> List[str]:
+        return [user_id for user_id, user in self.users.items() if interest.lower() in [i.lower() for i in user.interests] and user.privacy_setting == "public"]
 
     def form_group(self, interest: str, min_size: int = 3, max_size: int = 10) -> List[str]:
-        interested_users = [user_id for user_id, user in self.users.items() if interest in user.interests and user.privacy_setting == "public"]
+        interested_users = self.search_users_by_interest(interest)
         if len(interested_users) < min_size:
             return []
         return random.sample(interested_users, min(len(interested_users), max_size))
 
-# Function to handle errors
+    def save_users(self):
+        with open(self.data_file, 'w') as f:
+            json.dump({uid: user.to_dict() for uid, user in self.users.items()}, f, indent=4)
+
+    def load_users(self):
+        if os.path.exists(self.data_file):
+            with open(self.data_file, 'r') as f:
+                data = json.load(f)
+                self.users = {uid: User.from_dict(user_data) for uid, user_data in data.items()}
+
 def handle_error(error_message):
     print(f"Error: {error_message}")
+    messagebox.showerror("Error", error_message)
 
-# Function to reply to an uplifting message
 def reply_to_message(original_message, reply):
     try:
         print(f"Original Message: {original_message}")
@@ -100,9 +171,12 @@ def reply_to_message(original_message, reply):
         handle_error(f"Error replying to the message: {e}")
         return None
 
-# Function to get a random uplifting message
 def get_random_message():
     return random.choice(uplifting_messages)
+
+def validate_email(email: str) -> bool:
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
 
 class CommuniSphereApp(tk.Tk):
     def __init__(self):
@@ -115,10 +189,11 @@ class CommuniSphereApp(tk.Tk):
         
         container = tk.Frame(self)
         container.pack(side="top", fill="both", expand=True)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
         
         self.frames = {}
-        
-        for F in (StartPage, MessagesPage, PhotosPage, SongsPage, LoginPage, ProfilePage, ConnectionsPage):
+        for F in (StartPage, MessagesPage, PhotosPage, SongsPage, LoginPage, ProfilePage, ConnectionsPage, ViewProfilePage, UserProfilePage):
             page_name = F.__name__
             frame = F(parent=container, controller=self)
             self.frames[page_name] = frame
@@ -130,271 +205,572 @@ class CommuniSphereApp(tk.Tk):
         frame = self.frames[page_name]
         frame.tkraise()
 
+    def logout(self):
+        self.current_user_id = None
+        messagebox.showinfo("Success", "Logged out successfully")
+        self.show_frame("StartPage")
+
 class StartPage(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        label = tk.Label(self, text="Welcome to CommuniSphere")
-        label.pack(side="top", fill="x", pady=10)
+        tk.Label(self, text="Welcome to CommuniSphere", font=("Arial", 16)).pack(side="top", fill="x", pady=10)
         
-        login_button = tk.Button(self, text="Login", command=lambda: controller.show_frame("LoginPage"))
-        login_button.pack()
+        if self.controller.current_user_id:
+            tk.Label(self, text=f"Logged in as: {self.controller.ai_agent.users[self.controller.current_user_id].name}").pack(pady=5)
+            tk.Button(self, text="View Profile", command=lambda: controller.show_frame("ViewProfilePage")).pack(pady=5)
+            tk.Button(self, text="Logout", command=controller.logout).pack(pady=5)
         
-        profile_button = tk.Button(self, text="Create Profile", command=lambda: controller.show_frame("ProfilePage"))
-        profile_button.pack()
-
-        msg_button = tk.Button(self, text="Messages", command=lambda: controller.show_frame("MessagesPage"))
-        msg_button.pack()
-        
-        photos_button = tk.Button(self, text="Photos", command=lambda: controller.show_frame("PhotosPage"))
-        photos_button.pack()
-        
-        songs_button = tk.Button(self, text="Songs", command=lambda: controller.show_frame("SongsPage"))
-        songs_button.pack()
-
-        connections_button = tk.Button(self, text="Connections", command=lambda: controller.show_frame("ConnectionsPage"))
-        connections_button.pack()
+        tk.Button(self, text="Login", command=lambda: controller.show_frame("LoginPage")).pack(pady=5)
+        tk.Button(self, text="Create Profile", command=lambda: controller.show_frame("ProfilePage")).pack(pady=5)
+        tk.Button(self, text="Messages", command=lambda: controller.show_frame("MessagesPage")).pack(pady=5)
+        tk.Button(self, text="Photos", command=lambda: controller.show_frame("PhotosPage")).pack(pady=5)
+        tk.Button(self, text="Songs", command=lambda: controller.show_frame("SongsPage")).pack(pady=5)
+        tk.Button(self, text="Connections", command=lambda: controller.show_frame("ConnectionsPage")).pack(pady=5)
 
 class LoginPage(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        label = tk.Label(self, text="Log In")
-        label.pack(side="top", fill="x", pady=10)
+        tk.Label(self, text="Log In", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
 
+        tk.Label(self, text="Email").pack()
         self.email_entry = tk.Entry(self)
         self.email_entry.pack()
-        self.email_entry.insert(0, "Email")
 
+        tk.Label(self, text="Password").pack()
         self.password_entry = tk.Entry(self, show="*")
         self.password_entry.pack()
-        self.password_entry.insert(0, "Password")
 
-        login_button = tk.Button(self, text="Log In", command=self.log_in)
-        login_button.pack()
-
-        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
-        back_button.pack()
+        tk.Button(self, text="Log In", command=self.log_in).pack(pady=10)
+        tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage")).pack()
 
     def log_in(self):
-        email = self.email_entry.get()
-        password = self.password_entry.get()
+        email = self.email_entry.get().strip()
+        password = self.password_entry.get().strip()
+        if not email or not password:
+            handle_error("Email and password cannot be empty")
+            return
+        if not validate_email(email):
+            handle_error("Invalid email format")
+            return
         for user_id, user in self.controller.ai_agent.users.items():
             if user.email == email and user.password == password:
                 self.controller.current_user_id = user_id
                 messagebox.showinfo("Success", f"Logged in successfully as {user.name}")
                 self.controller.show_frame("StartPage")
                 return
-        messagebox.showerror("Error", "Invalid email or password")
+        handle_error("Invalid email or password")
 
 class ProfilePage(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        label = tk.Label(self, text="Create Profile")
-        label.pack(side="top", fill="x", pady=10)
+        tk.Label(self, text="Create Profile", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
 
+        tk.Label(self, text="Username").pack()
         self.username_entry = tk.Entry(self)
         self.username_entry.pack()
-        self.username_entry.insert(0, "Username")
 
+        tk.Label(self, text="Email").pack()
         self.email_entry = tk.Entry(self)
         self.email_entry.pack()
-        self.email_entry.insert(0, "Email")
 
+        tk.Label(self, text="Password").pack()
         self.password_entry = tk.Entry(self, show="*")
         self.password_entry.pack()
-        self.password_entry.insert(0, "Password")
 
+        tk.Label(self, text="Interests (comma-separated)").pack()
         self.interests_entry = tk.Entry(self)
         self.interests_entry.pack()
-        self.interests_entry.insert(0, "Interests (comma-separated)")
 
+        tk.Label(self, text="Skills (comma-separated)").pack()
         self.skills_entry = tk.Entry(self)
         self.skills_entry.pack()
-        self.skills_entry.insert(0, "Skills (comma-separated)")
 
-        create_button = tk.Button(self, text="Create Profile", command=self.create_profile)
-        create_button.pack()
+        tk.Label(self, text="Goals (comma-separated)").pack()
+        self.goals_entry = tk.Entry(self)
+        self.goals_entry.pack()
 
-        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
-        back_button.pack()
+        tk.Label(self, text="Privacy Setting").pack()
+        self.privacy_var = tk.StringVar(value="public")
+        tk.Radiobutton(self, text="Public", variable=self.privacy_var, value="public").pack()
+        tk.Radiobutton(self, text="Private", variable=self.privacy_var, value="private").pack()
+
+        tk.Button(self, text="Create Profile", command=self.create_profile).pack(pady=10)
+        tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage")).pack()
 
     def create_profile(self):
-        username = self.username_entry.get()
-        email = self.email_entry.get()
-        password = self.password_entry.get()
-        interests = set(self.interests_entry.get().split(','))
-        skills = set(self.skills_entry.get().split(','))
-        
-        user_id = f"user_{len(self.controller.ai_agent.users) + 1}"
-        user = self.controller.ai_agent.create_user(user_id, username, email, password)
-        self.controller.ai_agent.update_profile(user_id, interests=interests, skills=skills)
-        
-        messagebox.showinfo("Success", "Profile created successfully")
-        self.controller.show_frame("StartPage")
+        username = self.username_entry.get().strip()
+        email = self.email_entry.get().strip()
+        password = self.password_entry.get().strip()
+        interests = self.interests_entry.get().strip().split(',')
+        skills = self.skills_entry.get().strip().split(',')
+        goals = self.goals_entry.get().strip().split(',')
+        privacy_setting = self.privacy_var.get()
+
+        if not all([username, email, password]):
+            handle_error("All fields must be filled")
+            return
+        if not validate_email(email):
+            handle_error("Invalid email format")
+            return
+        try:
+            user_id = str(uuid.uuid4())
+            user = self.controller.ai_agent.create_user(user_id, username, email, password)
+            self.controller.ai_agent.update_profile(user_id, interests=interests, skills=skills, goals=goals, privacy_setting=privacy_setting)
+            messagebox.showinfo("Success", "Profile created successfully")
+            self.controller.show_frame("StartPage")
+        except ValueError as e:
+            handle_error(str(e))
+
+class ViewProfilePage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        tk.Label(self, text="Your Profile", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
+
+        self.profile_display = scrolledtext.ScrolledText(self, width=50, height=10)
+        self.profile_display.pack()
+
+        tk.Label(self, text="Update Interests (comma-separated)").pack()
+        self.interests_entry = tk.Entry(self)
+        self.interests_entry.pack()
+
+        tk.Label(self, text="Update Skills (comma-separated)").pack()
+        self.skills_entry = tk.Entry(self)
+        self.skills_entry.pack()
+
+        tk.Label(self, text="Update Goals (comma-separated)").pack()
+        self.goals_entry = tk.Entry(self)
+        self.goals_entry.pack()
+
+        tk.Label(self, text="Privacy Setting").pack()
+        self.privacy_var = tk.StringVar(value="public")
+        tk.Radiobutton(self, text="Public", variable=self.privacy_var, value="public").pack()
+        tk.Radiobutton(self, text="Private", variable=self.privacy_var, value="private").pack()
+
+        tk.Button(self, text="Update Profile", command=self.update_profile).pack(pady=10)
+        tk.Button(self, text="View Other Profiles", command=lambda: controller.show_frame("ConnectionsPage")).pack(pady=5)
+        tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage")).pack()
+
+    def tkraise(self, *args, **kwargs):
+        if not self.controller.current_user_id:
+            handle_error("You must be logged in to view your profile")
+            self.controller.show_frame("StartPage")
+            return
+        super().tkraise(*args, **kwargs)
+        self.display_profile()
+
+    def display_profile(self):
+        user = self.controller.ai_agent.users.get(self.controller.current_user_id)
+        if user:
+            self.profile_display.delete(1.0, tk.END)
+            self.profile_display.insert(tk.END, f"Name: {user.name}\n")
+            self.profile_display.insert(tk.END, f"Email: {user.email}\n")
+            self.profile_display.insert(tk.END, f"Interests: {', '.join(user.interests)}\n")
+            self.profile_display.insert(tk.END, f"Skills: {', '.join(user.skills)}\n")
+            self.profile_display.insert(tk.END, f"Goals: {', '.join(user.goals)}\n")
+            self.profile_display.insert(tk.END, f"Privacy: {user.privacy_setting}\n")
+            self.privacy_var.set(user.privacy_setting)
+
+    def update_profile(self):
+        if not self.controller.current_user_id:
+            handle_error("You must be logged in to update your profile")
+            return
+        interests = self.interests_entry.get().strip().split(',')
+        skills = self.skills_entry.get().strip().split(',')
+        goals = self.goals_entry.get().strip().split(',')
+        privacy_setting = self.privacy_var.get()
+        self.controller.ai_agent.update_profile(self.controller.current_user_id, 
+                                              interests=interests, 
+                                              skills=skills, 
+                                              goals=goals, 
+                                              privacy_setting=privacy_setting)
+        messagebox.showinfo("Success", "Profile updated successfully")
+        self.display_profile()
 
 class MessagesPage(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        label = tk.Label(self, text="Messages")
-        label.pack(side="top", fill="x", pady=10)
+        tk.Label(self, text="Messages", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
         
-        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
-        back_button.pack()
+        tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage")).pack()
 
         self.message_display = scrolledtext.ScrolledText(self, width=50, height=10)
         self.message_display.pack()
 
-        random_msg_button = tk.Button(self, text="Post Random Message", command=self.post_random_message)
-        random_msg_button.pack()
+        tk.Button(self, text="Post Random Message", command=self.post_random_message).pack(pady=5)
 
+        tk.Label(self, text="Custom Message").pack()
         self.custom_message_entry = tk.Entry(self)
         self.custom_message_entry.pack()
-        self.custom_message_entry.insert(0, "Enter custom message")
 
-        custom_msg_button = tk.Button(self, text="Post Custom Message", command=self.post_custom_message)
-        custom_msg_button.pack()
+        tk.Button(self, text="Post Custom Message", command=self.post_custom_message).pack(pady=5)
 
     def post_random_message(self):
+        if not self.controller.current_user_id:
+            handle_error("You must be logged in to post messages")
+            return
         message = get_random_message()
         self.message_display.insert(tk.END, f"{message}\n")
+        user = self.controller.ai_agent.users[self.controller.current_user_id]
+        user.messages.append(message)
+        self.controller.ai_agent.save_users()
 
     def post_custom_message(self):
-        message = self.custom_message_entry.get()
+        if not self.controller.current_user_id:
+            handle_error("You must be logged in to post messages")
+            return
+        message = self.custom_message_entry.get().strip()
+        if not message:
+            handle_error("Message cannot be empty")
+            return
         self.message_display.insert(tk.END, f"{message}\n")
+        user = self.controller.ai_agent.users[self.controller.current_user_id]
+        user.messages.append(message)
+        self.controller.ai_agent.save_users()
+        self.custom_message_entry.delete(0, tk.END)
 
 class PhotosPage(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        label = tk.Label(self, text="Photos")
-        label.pack(side="top", fill="x", pady=10)
+        tk.Label(self, text="Photos", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
         
-        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
-        back_button.pack()
+        tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage")).pack()
 
-        upload_button = tk.Button(self, text="Upload Photo", command=self.upload_photo)
-        upload_button.pack()
+        tk.Button(self, text="Upload Photo", command=self.upload_photo).pack(pady=5)
 
         self.photo_display = tk.Label(self)
         self.photo_display.pack()
 
     def upload_photo(self):
+        if not self.controller.current_user_id:
+            handle_error("You must be logged in to upload photos")
+            return
         file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.gif")])
         if file_path:
-            img = tk.PhotoImage(file=file_path)
-            self.photo_display.config(image=img)
-            self.photo_display.image = img
+            try:
+                img = Image.open(file_path)
+                img = img.resize((300, 300), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self.photo_display.config(image=photo)
+                self.photo_display.image = photo
+                user = self.controller.ai_agent.users[self.controller.current_user_id]
+                user.photos.append(file_path)
+                self.controller.ai_agent.save_users()
+            except Exception as e:
+                handle_error(f"Could not load image: {e}")
 
 class SongsPage(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        label = tk.Label(self, text="Songs")
-        label.pack(side="top", fill="x", pady=10)
+        tk.Label(self, text="Songs", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
         
-        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
-        back_button.pack()
+        tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage")).pack()
 
-        upload_button = tk.Button(self, text="Upload Song", command=self.upload_song)
-        upload_button.pack()
+        tk.Button(self, text="Upload Song", command=self.upload_song).pack(pady=5)
 
-        self.song_listbox = tk.Listbox(self)
+        self.song_listbox = tk.Listbox(self, width=50)
         self.song_listbox.pack()
 
-        play_button = tk.Button(self, text="Play Song", command=self.play_song)
-        play_button.pack()
+        tk.Button(self, text="Play Song", command=self.play_song).pack(pady=5)
+        tk.Button(self, text="Stop Song", command=self.stop_song).pack(pady=5)
 
     def upload_song(self):
+        if not self.controller.current_user_id:
+            handle_error("You must be logged in to upload songs")
+            return
         file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.mp3;*.wav;*.ogg")])
         if file_path:
-            self.song_listbox.insert(tk.END, file_path)
+            self.song_listbox.insert(tk.END, os.path.basename(file_path))
+            self.song_listbox.file_paths = getattr(self.song_listbox, 'file_paths', []) + [file_path]
+            user = self.controller.ai_agent.users[self.controller.current_user_id]
+            user.songs.append(file_path)
+            self.controller.ai_agent.save_users()
 
     def play_song(self):
-        selected_song = self.song_listbox.get(tk.ACTIVE)
-        if selected_song:
-            try:
-                pygame.mixer.music.load(selected_song)
-                pygame.mixer.music.play()
-                messagebox.showinfo("Playing", f"Playing {selected_song}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not play song: {e}")
+        selected_index = self.song_listbox.curselection()
+        if not selected_index:
+            handle_error("No song selected")
+            return
+        selected_song = self.song_listbox.file_paths[selected_index[0]]
+        try:
+            pygame.mixer.music.load(selected_song)
+            pygame.mixer.music.play()
+            messagebox.showinfo("Playing", f"Playing {os.path.basename(selected_song)}")
+        except Exception as e:
+            handle_error(f"Could not play song: {e}")
+
+    def stop_song(self):
+        pygame.mixer.music.stop()
+        messagebox.showinfo("Stopped", "Song playback stopped")
 
 class ConnectionsPage(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        label = tk.Label(self, text="Connections")
-        label.pack(side="top", fill="x", pady=10)
+        tk.Label(self, text="Connections", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
         
-        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
-        back_button.pack()
+        tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage")).pack()
 
-        self.recommendations_listbox = tk.Listbox(self)
+        tk.Label(self, text="Search by Skill, Interest, or Name").pack()
+        self.search_entry = tk.Entry(self)
+        self.search_entry.pack()
+        tk.Button(self, text="Search", command=self.search_users).pack(pady=5)
+
+        tk.Label(self, text="Recommendations").pack()
+        self.recommendations_listbox = tk.Listbox(self, width=50)
         self.recommendations_listbox.pack()
 
-        refresh_button = tk.Button(self, text="Refresh Recommendations", command=self.refresh_recommendations)
-        refresh_button.pack()
+        tk.Button(self, text="Refresh Recommendations", command=self.refresh_recommendations).pack(pady=5)
+        tk.Button(self, text="Connect", command=self.connect_with_user).pack(pady=5)
+        tk.Button(self, text="View Profile", command=self.view_user_profile).pack(pady=5)
 
-        connect_button = tk.Button(self, text="Connect", command=self.connect_with_user)
-        connect_button.pack()
+        tk.Label(self, text="Your Connections").pack()
+        self.connections_listbox = tk.Listbox(self, width=50)
+        self.connections_listbox.pack()
 
-    def refresh_recommendations(self):
-        if self.controller.current_user_id:
-            recommendations = self.controller.ai_agent.recommend_connections(self.controller.current_user_id)
-            self.recommendations_listbox.delete(0, tk)
-                                                
-class ConnectionsPage(tk.Frame):
-    def __init__(self, parent, controller):
-        super().__init__(parent)
-        self.controller = controller
-        label = tk.Label(self, text="Connections")
-        label.pack(side="top", fill="x", pady=10)
-        
-        back_button = tk.Button(self, text="Back", command=lambda: controller.show_frame("StartPage"))
-        back_button.pack()
-
-        self.recommendations_listbox = tk.Listbox(self)
-        self.recommendations_listbox.pack()
-
-        refresh_button = tk.Button(self, text="Refresh Recommendations", command=self.refresh_recommendations)
-        refresh_button.pack()
-
-        connect_button = tk.Button(self, text="Connect", command=self.connect_with_user)
-        connect_button.pack()
+        tk.Button(self, text="Remove Connection", command=self.remove_connection).pack(pady=5)
 
     def refresh_recommendations(self):
-        if self.controller.current_user_id:
-            recommendations = self.controller.ai_agent.recommend_connections(self.controller.current_user_id)
-            self.recommendations_listbox.delete(0, tk.END)
-            for user_id in recommendations:
-                user = self.controller.ai_agent.users[user_id]
-                self.recommendations_listbox.insert(tk.END, f"{user.name} ({user_id})")
-        else:
-            messagebox.showinfo("Info", "Please log in to see recommendations")
+        if not self.controller.current_user_id:
+            handle_error("Please log in to see recommendations")
+            return
+        recommendations = self.controller.ai_agent.recommend_connections(self.controller.current_user_id)
+        self.recommendations_listbox.delete(0, tk.END)
+        for user_id in recommendations:
+            user = self.controller.ai_agent.users[user_id]
+            self.recommendations_listbox.insert(tk.END, f"{user.name} ({user_id})")
+        # Display current connections
+        self.connections_listbox.delete(0, tk.END)
+        user = self.controller.ai_agent.users.get(self.controller.current_user_id)
+        for user_id in user.connections:
+            conn_user = self.controller.ai_agent.users[user_id]
+            self.connections_listbox.insert(tk.END, f"{conn_user.name} ({user_id})")
 
     def connect_with_user(self):
-        selected_user = self.recommendations_listbox.get(tk.ACTIVE)
-        if selected_user and self.controller.current_user_id:
-            self.controller.ai_agent.accept_connection(self.controller.current_user_id, selected_user)
-            messagebox.showinfo("Success", f"Connected with {selected_user}")
-        else:
-            messagebox.showerror("Error", "No user selected or you're not logged in.")
-
+        if not self.controller.current_user_id:
+            handle_error("Please log in to connect with users")
+            return
         selected_index = self.recommendations_listbox.curselection()
         if not selected_index:
-            messagebox.showinfo("Info", "Please select a user to connect with")
+            handle_error("Please select a user to connect with")
             return
-
         selected_item = self.recommendations_listbox.get(selected_index)
         other_user_id = selected_item.split('(')[-1].split(')')[0]
-        
-        self.controller.ai_agent.accept_connection(self.controller.current_user_id, other_user_id)
-        messagebox.showinfo("Success", f"Connected with {self.controller.ai_agent.users[other_user_id].name}")
-        self.refresh_recommendations()
+        try:
+            self.controller.ai_agent.accept_connection(self.controller.current_user_id, other_user_id)
+            messagebox.showinfo("Success", f"Connected with {self.controller.ai_agent.users[other_user_id].name}")
+            self.refresh_recommendations()
+        except ValueError as e:
+            handle_error(str(e))
+
+    def remove_connection(self):
+        if not self.controller.current_user_id:
+            handle_error("Please log in to remove connections")
+            return
+        selected_index = self.connections_listbox.curselection()
+        if not selected_index:
+            handle_error("Please select a connection to remove")
+            return
+        selected_item = self.connections_listbox.get(selected_index)
+        other_user_id = selected_item.split('(')[-1].split(')')[0]
+        try:
+            self.controller.ai_agent.remove_connection(self.controller.current_user_id, other_user_id)
+            messagebox.showinfo("Success", f"Removed connection with {self.controller.ai_agent.users[other_user_id].name}")
+            self.refresh_recommendations()
+        except ValueError as e:
+            handle_error(str(e))
+
+    def view_user_profile(self):
+        if not self.controller.current_user_id:
+            handle_error("Please log in to view profiles")
+            return
+        selected_index = self.recommendations_listbox.curselection() or self.connections_listbox.curselection()
+        if not selected_index:
+            handle_error("Please select a user to view their profile")
+            return
+        selected_item = (self.recommendations_listbox.get(selected_index) if self.recommendations_listbox.curselection()
+                        else self.connections_listbox.get(selected_index))
+        other_user_id = selected_item.split('(')[-1].split(')')[0]
+        user = self.controller.ai_agent.users.get(other_user_id)
+        if not user:
+            handle_error("User not found")
+            return
+        if user.privacy_setting == "private" and other_user_id not in self.controller.ai_agent.users[self.controller.current_user_id].connections:
+            handle_error("This user's profile is private")
+            return
+        self.controller.frames["UserProfilePage"].set_user(other_user_id)
+        self.controller.show_frame("UserProfilePage")
+
+    def search_users(self):
+        query = self.search_entry.get().strip()
+        if not query:
+            handle_error("Search query cannot be empty")
+            return
+        skill_results = self.controller.ai_agent.search_users_by_skill(query)
+        interest_results = self.controller.ai_agent.search_users_by_interest(query)
+        name_results = [uid for uid, user in self.controller.ai_agent.users.items() 
+                       if query.lower() in user.name.lower() and user.privacy_setting == "public"]
+        results = set(skill_results + interest_results + name_results) - set([self.controller.current_user_id])
+        self.recommendations_listbox.delete(0, tk.END)
+        for user_id in results:
+            user = self.controller.ai_agent.users[user_id]
+            self.recommendations_listbox.insert(tk.END, f"{user.name} ({user_id})")
+        if not results:
+            messagebox.showinfo("Info", "No users found matching the query")
+
+class UserProfilePage(tk.Frame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        self.current_profile_id = None
+
+        tk.Label(self, text="User Profile", font=("Arial", 14)).pack(side="top", fill="x", pady=10)
+        tk.Button(self, text="Back", command=self.go_back).pack()
+
+        # Profile info
+        self.profile_display = scrolledtext.ScrolledText(self, width=50, height=10)
+        self.profile_display.pack()
+
+        # Tabs for content
+        self.tab_frame = tk.Frame(self)
+        self.tab_frame.pack(fill="x", pady=5)
+        self.content_frame = tk.Frame(self)
+        self.content_frame.pack(fill="both", expand=True)
+
+        self.message_button = tk.Button(self.tab_frame, text="Messages", command=self.show_messages)
+        self.message_button.pack(side="left", padx=5)
+        self.photo_button = tk.Button(self.tab_frame, text="Photos", command=self.show_photos)
+        self.photo_button.pack(side="left", padx=5)
+        self.song_button = tk.Button(self.tab_frame, text="Songs", command=self.show_songs)
+        self.song_button.pack(side="left", padx=5)
+
+        # Messages display
+        self.message_display = scrolledtext.ScrolledText(self.content_frame, width=50, height=10)
+        # Photos canvas
+        self.photo_canvas = tk.Canvas(self.content_frame, width=300, height=300)
+        self.photo_scrollbar = tk.Scrollbar(self.content_frame, orient="vertical", command=self.photo_canvas.yview)
+        self.photo_frame = tk.Frame(self.photo_canvas)
+        self.photo_frame.bind("<Configure>", lambda e: self.photo_canvas.configure(scrollregion=self.photo_canvas.bbox("all")))
+        self.photo_canvas.create_window((0, 0), window=self.photo_frame, anchor="nw")
+        self.photo_canvas.configure(yscrollcommand=self.photo_scrollbar.set)
+        # Songs listbox
+        self.song_listbox = tk.Listbox(self.content_frame, width=50)
+        tk.Button(self.content_frame, text="Play Song", command=self.play_song).pack()
+        tk.Button(self.content_frame, text="Stop Song", command=self.stop_song).pack()
+
+        self.current_content = None
+
+    def set_user(self, user_id):
+        self.current_profile_id = user_id
+        self.display_profile()
+
+    def tkraise(self, *args, **kwargs):
+        if not self.current_profile_id:
+            handle_error("No user profile selected")
+            self.controller.show_frame("StartPage")
+            return
+        super().tkraise(*args, **kwargs)
+        self.display_profile()
+
+    def go_back(self):
+        if self.controller.current_user_id and self.current_profile_id == self.controller.current_user_id:
+            self.controller.show_frame("ViewProfilePage")
+        else:
+            self.controller.show_frame("ConnectionsPage")
+
+    def display_profile(self):
+        user = self.controller.ai_agent.users.get(self.current_profile_id)
+        if not user:
+            handle_error("User not found")
+            self.controller.show_frame("StartPage")
+            return
+        self.profile_display.delete(1.0, tk.END)
+        self.profile_display.insert(tk.END, f"Name: {user.name}\n")
+        self.profile_display.insert(tk.END, f"Interests: {', '.join(user.interests)}\n")
+        self.profile_display.insert(tk.END, f"Skills: {', '.join(user.skills)}\n")
+        self.profile_display.insert(tk.END, f"Goals: {', '.join(user.goals)}\n")
+        self.profile_display.insert(tk.END, f"Privacy: {user.privacy_setting}\n")
+        self.show_messages()
+
+    def show_messages(self):
+        self.clear_content()
+        self.current_content = "messages"
+        self.message_display.pack(fill="both", expand=True)
+        user = self.controller.ai_agent.users.get(self.current_profile_id)
+        self.message_display.delete(1.0, tk.END)
+        for msg in user.messages:
+            self.message_display.insert(tk.END, f"{msg}\n")
+
+    def show_photos(self):
+        self.clear_content()
+        self.current_content = "photos"
+        self.photo_canvas.pack(side="left", fill="both", expand=True)
+        self.photo_scrollbar.pack(side="right", fill="y")
+        user = self.controller.ai_agent.users.get(self.current_profile_id)
+        for widget in self.photo_frame.winfo_children():
+            widget.destroy()
+        self.photo_images = []
+        for file_path in user.photos:
+            if os.path.exists(file_path):
+                try:
+                    img = Image.open(file_path)
+                    img = img.resize((100, 100), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    label = tk.Label(self.photo_frame, image=photo)
+                    label.image = photo
+                    self.photo_images.append(photo)
+                    label.pack(pady=5)
+                except Exception as e:
+                    print(f"Could not load photo {file_path}: {e}")
+
+    def show_songs(self):
+        self.clear_content()
+        self.current_content = "songs"
+        self.song_listbox.pack(fill="both", expand=True)
+        self.song_listbox.file_paths = []
+        self.song_listbox.delete(0, tk.END)
+        user = self.controller.ai_agent.users.get(self.current_profile_id)
+        for file_path in user.songs:
+            if os.path.exists(file_path):
+                self.song_listbox.insert(tk.END, os.path.basename(file_path))
+                self.song_listbox.file_paths.append(file_path)
+
+    def clear_content(self):
+        if self.current_content == "messages":
+            self.message_display.pack_forget()
+        elif self.current_content == "photos":
+            self.photo_canvas.pack_forget()
+            self.photo_scrollbar.pack_forget()
+        elif self.current_content == "songs":
+            self.song_listbox.pack_forget()
+        self.current_content = None
+
+    def play_song(self):
+        selected_index = self.song_listbox.curselection()
+        if not selected_index:
+            handle_error("No song selected")
+            return
+        selected_song = self.song_listbox.file_paths[selected_index[0]]
+        try:
+            pygame.mixer.music.load(selected_song)
+            pygame.mixer.music.play()
+            messagebox.showinfo("Playing", f"Playing {os.path.basename(selected_song)}")
+        except Exception as e:
+            handle_error(f"Could not play song: {e}")
+
+    def stop_song(self):
+        pygame.mixer.music.stop()
+        messagebox.showinfo("Stopped", "Song playback stopped")
 
 if __name__ == "__main__":
-    app = CommuniSphereApp()
-    app.mainloop()
+    try:
+        app = CommuniSphereApp()
+        app.mainloop()
+    except Exception as e:
+        handle_error(f"Application error: {e}")
